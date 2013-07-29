@@ -63,34 +63,9 @@ if(~exist('vAnatFile','var') || isempty(vAnatFile))
     % Try to find it
     vAnatFile = getVAnatomyPath;
 end
-if(~exist('inplaneFile','var') || isempty(inplaneFile))
-    % Try to find it
-    inplaneDir = fullfile(sessionDir,'Raw','Anatomy','Inplane');
-    d = dir(fullfile(inplaneDir, 'I*001*'));
-    if ~isempty(d), % ie any Ifiles are found
-        inplaneFile = fullfile(inplaneDir, d(1).name);
-        if(~exist(inplaneFile,'file'))
-            [f,p] = uigetfile({'*.dcm','Dicom';'*.001','I-file';'*.gz','gzipped';'*.*','all'}, ...
-                'Select a slice from raw Inplane files...', inplaneFile);
-            if(isequal(f,0) || isequal(p,0))
-                disp('User canceled.'); return;
-            else
-                inplaneFile = fullfile(p,f);
-            end
-        end;
-    end
-end
-inplaneAnatFile = fullfile(sessionDir,'Inplane','anat.mat');
-if(~exist(inplaneAnatFile,'file'))
-    [f,p] = uigetfile({'*.mat','mat';'*.*','all'}, ...
-        'Select the Inplane anat.mat file...', inplaneAnatFile);
-    if(isequal(f,0) || isequal(p,0))
-        disp('User canceled.'); return;
-    else
-        inplaneAnatFile = fullfile(p,f);
-    end
-end
-disp(inplaneAnatFile);
+
+
+disp(sessionGet(mrSESSION, 'inplane path'));
 disp(vAnatFile);
 
 % check if alignment exists and give option to use this as a
@@ -102,7 +77,7 @@ if notDefined('initXFM'),
         bn = questdlg(['mrSESSION.alignment exists. Do you want to to use ' ...
             'it as a starting estimate?'],...
             'starting estimate','Yes','No','No');
-        if strmatch(bn,'Yes'),
+        if strcmpi(bn,'Yes'),
             useStartingEstimate = 1;
         end;
     end;
@@ -118,7 +93,11 @@ vAnatAcpcXform = [0 0 v.mm(3) -hsz(3); 0 -v.mm(2) 0 hsz(1); -v.mm(1) 0 0 hsz(2);
 VF.uint8 = uint8(v.img);
 VF.mat = vAnatAcpcXform;
 
-ip = load(inplaneAnatFile);
+% Load INPLANE anatomy data
+ip = initHiddenInplane;
+ipAnat = viewGet(ip, 'anat');
+ipNifti = viewGet(ip, 'anatomy nifti');
+
 % Correct for intensity gradient.
 % yet another anoying dialog, sorry...
 % For surface-coil data the results look better with correction - at
@@ -126,59 +105,31 @@ ip = load(inplaneAnatFile);
 if isempty(nuCorrect),
     bn = questdlg('Do you want to correct for an intensity gradient?',...
         'intensity gradient','Yes','No','No');
-    if strmatch(bn,'Yes'),
+    if strcmpi(bn,'Yes'),
         nuCorrect = true;
     else
         nuCorrect = false;
     end
 end
 if nuCorrect,
-    [GradInt GradNoise]  = regEstFilIntGrad(ip.anat);
-    ip.anat              = regCorrIntGradWiener(ip.anat,GradInt,GradNoise);
+    [GradInt, GradNoise] = regEstFilIntGrad(ipAnat);
+    ipAnat               = regCorrIntGradWiener(double(ipAnat),GradInt,GradNoise);
 end;
 
-% **** FIXE ME: we should compute and store the cannonical xform when we
-% create the anat.mat file. Also, we can do a bit better for the initial
-% alignment by taking the crop into account in the translations.
-%sz = size(ip.anat);
-% We assume that the brain is centered in the crop region.
-%cropOffset = ip.inplanes.crop(1,:)-(ip.inplanes.fullSize-diff(ip.inplanes.crop))/2;
-%cropOffset = ip.inplanes.crop(1,[2,1]); % OK
-% apparently ip.inplanes.crop will not exist for older versions
-if ~isfield(ip,'inplanes'),
-    sz               = size(ip.anat);
-    ip.inplanes.crop = [1 1;sz(1) sz(2)];
-end
-% not used?!
-%cropOffset = [ip.inplanes.crop(1,[2,1])./2 0];%4 (best?)
-%cropOffset = [eye(3) cropOffset'; 0 0 0 1];
 
 
-% If Ifiles exist use them for an initial xform otherwise center on 0.
-if ~ieNotDefined('inplaneFile'),
-    xformToScanner = inv(computeXformFromIfile(inplaneFile,ip.inplanes.crop));
-    xformToScanner(1:3,4) = xformToScanner(1:3,4)+[10 -20 -20]';
-    % GE convention is right-to-left, but we want l-to-r (Talairach convention)
-    %lrFlip = [-1 0 0 ip.inplanes.fullSize(1); 0 1 0 0; 0 0 1 0; 0 0 0 1];
-    %lrFlip = [-1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1];
-    VG.mat = xformToScanner;
-else
-    % default xform (center on 0,0,0)
-    disp(sprintf('[%s]:No Ifiles found centering volume on 0.',mfilename));
-    voxSize = mrSESSION.inplanes.voxelSize;
-    VG.mat = [diag(voxSize),-(size(ip.anat)'.*voxSize'./2); 0 0 0 1];
-    % GE convention is right-to-left, but we want l-to-r (Talairach
-    % convention)
-    % Careful! If you rerun you don't want to keep flipping your image
-    % all the time
-    VG.mat(1,:) =  -VG.mat(1,:);
-    %VG.mat(2,:) =  -VG.mat(2,:);
-    %VG.mat(3,:) =  -VG.mat(3,:);
-    VG.mat
-end;
-%ip.anat = mrAnatHistogramClip(ip.anat, 0.4, 0.99);
-ip.anat = mrAnatHistogramClip(ip.anat, 0.2, 0.99);
-VG.uint8 = uint8(ip.anat*255+0.5);
+% Get the xform from the inplane nifti
+xformToScanner        = niftiGet(ipNifti, 'qto_xyz');
+xformToScanner(1:3,4) = xformToScanner(1:3,4)+[10 -20 -20]';
+
+% GE convention is right-to-left, but we want l-to-r (Talairach convention)
+%lrFlip = [-1 0 0 ip.inplanes.fullSize(1); 0 1 0 0; 0 0 1 0; 0 0 0 1];
+%lrFlip = [-1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1];
+VG.mat = xformToScanner;
+
+
+ipAnat = mrAnatHistogramClip(ipAnat, 0.2, 0.99);
+VG.uint8 = uint8(ipAnat*255+0.5);
 
 if useStartingEstimate,
     revAlignment = spm_imatrix(VF.mat*mrSESSION.alignment/VG.mat);
@@ -213,7 +164,7 @@ xform = alignment;
 
 sz = size(v.img);
 bb = [1,1,1; sz];
-ipVol = mrAnatResliceSpm(ip.anat, inv(alignment), bb, [1 1 1], [1 1 1 0 0 0], 0);
+ipVol = mrAnatResliceSpm(ipAnat, inv(alignment), bb, [1 1 1], [1 1 1 0 0 0], 0);
 ipVol(isnan(ipVol)) = 0;
 if(forceSave)
     % Save an image so user can check the alignment
@@ -239,11 +190,11 @@ else
 
     volIm = makeMontage(v.img,40:9:sz(3)-40); volIm = volIm./255;
     if ~useStartingEstimate,
-        ipVolInitial = mrAnatResliceSpm(ip.anat, inv(VF.mat\eye(4)*VG.mat), ...
+        ipVolInitial = mrAnatResliceSpm(ipAnat, inv(VF.mat\eye(4)*VG.mat), ...
             bb, [1 1 1], [1 1 1 0 0 0], 0);
         titlestring  = 'Initial coarse alignment';
     else
-        ipVolInitial = mrAnatResliceSpm(ip.anat, inv(oldAlignment), ...
+        ipVolInitial = mrAnatResliceSpm(ipAnat, inv(oldAlignment), ...
             bb, [1 1 1], [1 1 1 0 0 0], 0);
         titlestring  = 'Initial alignment from mrSESSION.alignment';
     end;
